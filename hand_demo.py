@@ -1,13 +1,13 @@
-import cv2
-import mediapipe as mp
+from cv2 import imshow
+from mediapipe import solutions
 import obj_detect
-from video_loader import read_and_process, camera_stream_factory
-#from video_loader import read_and_process
-#from camera import camera_stream_factory
+#from video_loader import read_and_process, camera_stream_factory
+from video_loader import read_and_process
+from camera import camera_stream_factory
 
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
+mp_hands = solutions.hands
+mp_drawing = solutions.drawing_utils
+mp_drawing_styles = solutions.drawing_styles
 
 detector = obj_detect.Landmark_Creator()
 
@@ -23,6 +23,6 @@ def process_img(frame):
                 mp_drawing_styles.get_default_hand_connections_style()
             )
     
-    cv2.imshow('frame', frame)
+    imshow('frame', frame)
 
 read_and_process(camera_stream_factory, process_img)
