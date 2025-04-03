@@ -1,4 +1,4 @@
-import cv2
+from cv2 import imread, cvtColor, COLOR_BGR2RGB
 import mediapipe as mp
 import numpy as np
 from PIL import Image
@@ -15,7 +15,7 @@ class Landmark_Creator:
         )
 
     def process_image(self, image, process_landmarks=True):
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image_rgb = cvtColor(image, COLOR_BGR2RGB)
         results = self.hands.process(image_rgb)
         if not results.multi_hand_landmarks or len(results.multi_hand_landmarks) < MIN_HANDS:
             return {'result': 'DETECTION_FAILED'}
@@ -35,6 +35,6 @@ class Landmark_Creator:
 if __name__ == "__main__":
     landmarks = Landmark_Creator()
     image_path = './testing_images/testing_img_1.png'
-    image = cv2.imread(image_path)
+    image = imread(image_path)
     landmarks = landmarks.process_image(image)
     print(landmarks['landmarks'])

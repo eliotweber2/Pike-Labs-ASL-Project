@@ -1,4 +1,5 @@
-import cv2
+import numpy as np
+from cv2 import waitKey
 
 class StreamInterface:
     def __init__(self,open,read_frame,error,close):
@@ -19,35 +20,14 @@ class StreamInterface:
     def close(self):
         self.close_fn(self.video_input)
 
-def camera_stream_factory():
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Cannot open camera")
-        return
-    
-    def read(cap):
-        ret, frame = cap.read()
-        if not ret:
-            print("Can't receive frame (stream end?). Exiting ...")
-            return
-        return frame
-    
-    return StreamInterface(lambda: cv2.VideoCapture(0), lambda cap: read(cap), lambda x: print(x), lambda cap: cap.release)
-
-def read_and_process(stream_src, process_fn, stop_key='q'):
+def read_and_process(stream_src, process_fn, stop_key='q', n_skip=0):
     stream = stream_src()
     stream.open()
     while True:
+        for _ in range(n_skip):
+            stream.read_frame()
         frame = stream.read_frame()
         process_fn(frame)
-
-        if stop_key and cv2.waitKey(1) & 0xFF == ord(stop_key):
+        if stop_key and waitKey(1) & 0xFF == ord(stop_key):
             break
     stream.close()
-
-if __name__ == '__main__':
-    def process(frame):
-        cv2.imshow('frame', frame)
-        
-    read_and_process(camera_stream_factory, process)
-    cv2.destroyAllWindows()
