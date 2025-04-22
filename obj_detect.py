@@ -3,7 +3,7 @@ import mediapipe as mp
 import numpy as np
 from PIL import Image
 
-MIN_HANDS = 2
+MIN_HANDS = 1
 
 class Landmark_Creator:
     def __init__(self):
@@ -22,7 +22,9 @@ class Landmark_Creator:
         if not process_landmarks:
             return {'result': 'DETECTION_SUCCESS', 'landmarks': results.multi_hand_landmarks}
         landmark_lst = []
-        for hand in results.multi_hand_landmarks:
+        for (i, hand) in enumerate(results.multi_hand_landmarks):
+            if i > 1:
+                break
             hand_landmarks = []
             for landmark_id, landmark in enumerate(hand.landmark):
                 hand_landmarks.append([landmark_id, landmark.x, landmark.y, landmark.z])
