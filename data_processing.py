@@ -1,3 +1,4 @@
+# Alternative processing might work better with the model idk if you have time test it
 import numpy as np
 import pandas as pd
 import os
