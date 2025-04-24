@@ -29,13 +29,19 @@ def create_attention_model(n_classes, sequence_length, n_features):
     x = Bidirectional(LSTM(128, return_sequences=True))(x)
     x = Dropout(0.3)(x)
     
-    # Attention mechanism to focus on important frames
-    attention = Dense(1, activation='tanh')(x)
-    attention = tf.squeeze(attention, axis=-1)
-    attention_weights = tf.nn.softmax(attention, axis=1)
-    
-    # Apply attention
-    context = tf.reduce_sum(x * tf.expand_dims(attention_weights, axis=-1), axis=1)
+   # Attention mechanism to focus on important frames
+attention = Dense(1, activation='tanh')(x)
+attention_weights = tf.keras.layers.Lambda(
+    lambda x: tf.nn.softmax(tf.squeeze(x, axis=-1), axis=1)
+)(attention)
+
+# Apply attention
+context = tf.keras.layers.Lambda(
+    lambda inputs: tf.reduce_sum(
+        inputs[0] * tf.expand_dims(inputs[1], axis=-1), 
+        axis=1
+    )
+)([x, attention_weights])
     
     # Dense layers
     x = Dense(128, activation='relu')(context)
