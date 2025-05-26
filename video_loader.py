@@ -27,7 +27,9 @@ def read_and_process(stream_src, process_fn, stop_key='q', n_skip=0):
         for _ in range(n_skip):
             stream.read_frame()
         frame = stream.read_frame()
-        process_fn(frame)
+        if frame[1] is None:
+            return
+        process_fn(frame[1])
         if stop_key and waitKey(1) & 0xFF == ord(stop_key):
             break
     stream.close()

@@ -3,6 +3,7 @@ from video_loader import StreamInterface, read_and_process
 from obj_detect import Landmark_Creator
 from cv2 import VideoCapture, imshow
 from os import path
+import multiprocessing
 
 detector = Landmark_Creator()
 
@@ -19,12 +20,12 @@ def process_video(video_id):
     def process_frame(frame):
         landmarks = detector.process_image(frame)
         if landmarks['result'] == 'DETECTION_SUCCESS':
-            if len(landmarks['landmarks']) > 2:
-                return
             landmark_lst.append(landmarks['landmarks'])
     video_path = './ASL_Citizen/videos/' + video_id
 
-    read_and_process(lambda: file_stream_factory(video_path), lambda frame: process_frame(frame),n_skip=9)  
+    read_and_process(lambda: file_stream_factory(video_path), lambda frame: process_frame(frame),n_skip=1)  
+    if (len(landmark_lst) == 0):
+        return
     return format_landmarks(landmark_lst)
 
 def format_landmarks(frame_lst):
@@ -41,6 +42,9 @@ def create_landmark_file(destination_path, csv_file, landmark_filename):
     if path.exists(destination_path + '/' + landmark_filename):
         print("File already exists")
         #return
+    #pool = multiprocessing.Pool()
+    #inputs = csv_file['Video file'].tolist()
+    #outputs = pool.map(process_video, inputs)
 
     landmarks = pd.DataFrame(columns=['video_id', 'label', 'landmarks'])
     for i in range(len(csv_file)):
