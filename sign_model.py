@@ -2,7 +2,6 @@ import numpy as np
 import tensorflow as tf
 import pickle
 import os
-# import keras # Deprecated if tf.keras is consistently used; remove for clarity.
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import KFold # Used if KFold cross-validation is re-introduced
@@ -15,10 +14,6 @@ from tensorflow.keras.layers import (
     TimeDistributed, LayerNormalization, MultiHeadAttention # GlobalAveragePooling1D (if used elsewhere)
 )
 from tensorflow.keras.optimizers import Adam
-# from data_processing import prepare_sequences # Assuming this is correctly imported and modified
-
-# --- MODIFIED MODELS FOR PER-FRAME PREDICTIONS ---
-
 def create_attention_lstm_per_frame_model(n_classes, sequence_length, n_features):
     """
     Constructs an LSTM-based model designed for per-frame sequence prediction.
