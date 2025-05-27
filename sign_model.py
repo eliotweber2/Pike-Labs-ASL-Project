@@ -1,449 +1,391 @@
 import numpy as np
 import tensorflow as tf
 import pickle
-
 import os
-import keras
+# import keras # Deprecated if tf.keras is consistently used; remove for clarity.
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold # Used if KFold cross-validation is re-introduced
 import matplotlib.pyplot as plt
 import seaborn as sns
-from tqdm import tqdm
-from tensorflow.keras.models import Sequential, load_model, Model
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional, Input, Conv1D, MaxPooling1D
-from tensorflow.keras.layers import LayerNormalization, MultiHeadAttention, GlobalAveragePooling1D
+from tqdm import tqdm # For progress visualization in loops
+from tensorflow.keras.models import Model # Using Model functional API
+from tensorflow.keras.layers import (
+    LSTM, Dense, Dropout, Bidirectional, Input, Conv1D, MaxPooling1D,
+    TimeDistributed, LayerNormalization, MultiHeadAttention # GlobalAveragePooling1D (if used elsewhere)
+)
 from tensorflow.keras.optimizers import Adam
-from data_processing import prepare_sequences
+# from data_processing import prepare_sequences # Assuming this is correctly imported and modified
 
-# Enhanced model with attention mechanism for higher accuracy
-def create_attention_model(n_classes, sequence_length, n_features):
-    """Create an enhanced model architecture with attention mechanism for higher accuracy."""
-    
-    # Input layer
-    input_layer = Input(shape=(sequence_length, n_features))
-    
-    # First LSTM block
-    x = Bidirectional(LSTM(256, return_sequences=True))(input_layer)
-    x = Dropout(0.3)(x)
-    
-    # Second LSTM block
-    x = Bidirectional(LSTM(128, return_sequences=True))(x)
-    x = Dropout(0.3)(x)
-    
-    # Attention mechanism to focus on important frames
-    attention = Dense(1, activation='tanh')(x)
-    attention_weights = tf.keras.layers.Lambda(lambda x: tf.nn.softmax(tf.squeeze(x, axis=-1), axis=1))(attention)
-    
-    # Apply attention
-    context =  tf.keras.layers.Lambda(
-        lambda inputs: tf.reduce_sum(inputs[0] * tf.expand_dims(inputs[1], axis=-1), axis=1)
-        )([x, attention_weights])
-    
-    # Dense layers
-    x = Dense(128, activation='relu')(context)
-    x = Dropout(0.3)(x)
-    x = Dense(64, activation='relu')(x)
-    x = Dropout(0.3)(x)
-    
-    # Output layer
-    output_layer = Dense(n_classes, activation='softmax')(x)
-    
-    # Create model
-    model = Model(inputs=input_layer, outputs=output_layer)
-    
-    # Compile with a learning rate scheduler
-    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate=0.001,
-        decay_steps=1000,
-        decay_rate=0.9
-    )
+# --- MODIFIED MODELS FOR PER-FRAME PREDICTIONS ---
 
-    initial_learning_rate = 0.001
+def create_attention_lstm_per_frame_model(n_classes, sequence_length, n_features):
+    """
+    Constructs an LSTM-based model designed for per-frame sequence prediction.
 
-    optimizer = Adam(learning_rate=initial_learning_rate)
+    This architecture utilizes Bidirectional LSTMs to capture temporal context from
+    both past and future frames. Dense layers are applied to each time step's output
+    via the TimeDistributed wrapper to make independent predictions for each frame.
+    The original sequence-reducing attention mechanism has been removed to enable
+    per-frame outputs.
 
-    #optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-    
+    Args:
+        n_classes (int): The number of unique classes for prediction.
+        sequence_length (int): The fixed length of input sequences (number of time steps).
+        n_features (int): The dimensionality of features for each time step.
+
+    Returns:
+        tf.keras.Model: A compiled Keras model ready for training.
+    """
+    # Define the input layer, specifying the shape of one sequence.
+    input_layer = Input(shape=(sequence_length, n_features), name="input_sequence")
+
+    # First Bidirectional LSTM layer. `return_sequences=True` is crucial for passing
+    # the full sequence of outputs to the next layer, enabling per-frame processing.
+    x = Bidirectional(LSTM(256, return_sequences=True), name="bidi_lstm_1")(input_layer)
+    x = Dropout(0.3, name="dropout_1")(x) # Regularization to prevent overfitting.
+
+    # Second Bidirectional LSTM layer, further processing the sequence.
+    x = Bidirectional(LSTM(128, return_sequences=True), name="bidi_lstm_2")(x)
+    x = Dropout(0.3, name="dropout_2")(x)
+
+    # Apply Dense layers to each time step of the LSTM output sequence.
+    # The TimeDistributed wrapper is essential for this per-frame dense transformation.
+    x = TimeDistributed(Dense(128, activation='relu'), name="timedist_dense_1")(x)
+    x = Dropout(0.3, name="dropout_3")(x)
+    x = TimeDistributed(Dense(64, activation='relu'), name="timedist_dense_2")(x)
+    x = Dropout(0.3, name="dropout_4")(x)
+
+    # Output layer: TimeDistributed Dense layer with softmax activation for multi-class
+    # probability distribution over `n_classes` for each time step.
+    output_layer = TimeDistributed(Dense(n_classes, activation='softmax'), name="output_per_frame")(x)
+
+    # Construct the model.
+    model = Model(inputs=input_layer, outputs=output_layer, name="PerFrameAttentionLSTM")
+
+    # Compile the model. Adam optimizer is a common default.
+    # `sparse_categorical_crossentropy` is used as labels are integer-encoded (not one-hot).
+    # Accuracy will be computed on a per-frame basis.
+    optimizer = Adam(learning_rate=0.001) # Consider making learning rate configurable.
     model.compile(
         optimizer=optimizer,
         loss='sparse_categorical_crossentropy',
         metrics=['accuracy']
     )
-    
     return model
-# Create CNN-LSTM model for ensemble
-def create_cnn_lstm_model(n_classes, sequence_length, n_features):
-    print("Input shape:", (sequence_length, n_features))
-    """Create a CNN-LSTM model for the ensemble."""
-    input_layer = Input(shape=(sequence_length, n_features))
-    print('Input shape of layer:', input_layer.shape)
-    # CNN layers
-    x = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(input_layer)
-    x = MaxPooling1D(pool_size=2)(x)
-    x = Conv1D(filters=128, kernel_size=3, padding='same', activation='relu')(x)
-    x = MaxPooling1D(pool_size=2)(x)
-    
-    # LSTM layers
-    x = Bidirectional(LSTM(128, return_sequences=False))(x)
-    x = Dropout(0.3)(x)
-    
-    # Dense layers
-    x = Dense(128, activation='relu')(x)
-    x = Dropout(0.3)(x)
-    x = Dense(64, activation='relu')(x)
-    x = Dropout(0.3)(x)
-    
-    # Output layer
-    output_layer = Dense(n_classes, activation='softmax')(x)
-    
-    # Create model
-    model = Model(inputs=input_layer, outputs=output_layer)
 
-    initial_learning_rate = 0.001
+def create_cnn_lstm_per_frame_model(n_classes, sequence_length, n_features):
+    """
+    Constructs a CNN-LSTM model for per-frame sequence prediction.
 
-    optimizer = Adam(learning_rate=initial_learning_rate)
-    
+    This model first uses 1D Convolutional layers to extract local features
+    from the input sequences. MaxPooling reduces dimensionality and sequence length.
+    The output of the CNN part is then fed into a Bidirectional LSTM for
+    temporal modeling, followed by TimeDistributed Dense layers for per-frame predictions.
+
+    Important Note: MaxPooling layers alter the sequence length. The output sequence
+    length from this model will be shorter than `sequence_length`. This has implications
+    for label alignment during training and for ensembling with models that preserve
+    the original sequence length. Consider using UpSampling1D layers at the end
+    to restore original sequence length if needed for specific applications.
+
+    Args:
+        n_classes (int): Number of unique classes.
+        sequence_length (int): Input sequence length.
+        n_features (int): Dimensionality of input features per time step.
+
+    Returns:
+        tf.keras.Model: A compiled Keras model.
+    """
+    input_layer = Input(shape=(sequence_length, n_features), name="input_sequence")
+
+    # CNN feature extraction block.
+    # Conv1D layers act as feature detectors across the temporal dimension.
+    x = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu', name="conv1d_1")(input_layer)
+    # MaxPooling1D reduces sequence length (e.g., by factor of 2). `padding='same'` ensures
+    # that the output length is ceil(input_length / pool_size).
+    x = MaxPooling1D(pool_size=2, padding='same', name="maxpool1d_1")(x)
+    x = Conv1D(filters=128, kernel_size=3, padding='same', activation='relu', name="conv1d_2")(x)
+    x = MaxPooling1D(pool_size=2, padding='same', name="maxpool1d_2")(x)
+    # At this point, sequence length is approximately `sequence_length / 4`.
+
+    # LSTM layer for temporal modeling on the extracted convolutional features.
+    # `return_sequences=True` is essential for per-frame output from this block.
+    x = Bidirectional(LSTM(128, return_sequences=True), name="bidi_lstm_cnn")(x)
+    x = Dropout(0.3, name="dropout_cnn_lstm_1")(x)
+
+    # TimeDistributed Dense layers for classification on LSTM's output sequence.
+    x = TimeDistributed(Dense(128, activation='relu'), name="timedist_dense_cnn_1")(x)
+    x = Dropout(0.3, name="dropout_cnn_lstm_2")(x)
+    x = TimeDistributed(Dense(64, activation='relu'), name="timedist_dense_cnn_2")(x)
+    x = Dropout(0.3, name="dropout_cnn_lstm_3")(x)
+
+    # Output layer for per-frame predictions on the (pooled) sequence.
+    output_layer = TimeDistributed(Dense(n_classes, activation='softmax'), name="output_per_pooled_frame")(x)
+
+    model = Model(inputs=input_layer, outputs=output_layer, name="PerFrameCNN_LSTM")
+    optimizer = Adam(learning_rate=0.001)
     model.compile(
         optimizer=optimizer,
         loss='sparse_categorical_crossentropy',
-        metrics=['accuracy']
+        metrics=['accuracy'] # Accuracy on the (pooled) per-frame predictions.
     )
-    
     return model
-# Create Transformer model for ensemble
-def create_transformer_model(n_classes, sequence_length, n_features):
-    """Create a Transformer-based model for the ensemble."""
-    input_layer = Input(shape=(sequence_length, n_features))
-    
-    # Normalization and positional embeddings
-    x = LayerNormalization(epsilon=1e-6)(input_layer)
-    
-    # Transformer blocks
-    for _ in range(2):
-        # Multi-head attention
+
+def create_transformer_per_frame_model(n_classes, sequence_length, n_features):
+    """
+    Constructs a Transformer-based model for per-frame sequence prediction.
+
+    This model utilizes MultiHeadAttention layers for capturing relationships
+    across the sequence. LayerNormalization is applied for stability.
+    The GlobalAveragePooling1D layer is omitted to maintain the sequence structure
+    for per-frame predictions. Dense layers are applied per time step.
+
+    Args:
+        n_classes (int): Number of unique classes.
+        sequence_length (int): Input sequence length.
+        n_features (int): Dimensionality of input features per time step.
+
+    Returns:
+        tf.keras.Model: A compiled Keras model.
+    """
+    input_layer = Input(shape=(sequence_length, n_features), name="input_sequence")
+
+    # Initial Layer Normalization.
+    x = LayerNormalization(epsilon=1e-6, name="input_layernorm")(input_layer)
+
+    # Transformer blocks. Each block consists of Multi-Head Attention and a Feed-Forward Network.
+    # MultiHeadAttention processes the entire sequence and outputs a sequence of the same length.
+    num_transformer_blocks = 2 # Hyperparameter: number of Transformer blocks.
+    for i in range(num_transformer_blocks):
+        # Multi-Head Self-Attention.
+        # `key_dim` must be positive; ensure n_features is large enough or key_dim is hardcoded.
+        attention_key_dim = max(1, n_features // 8) # Ensure key_dim is at least 1.
         attention_output = MultiHeadAttention(
-            num_heads=8, key_dim=64, dropout=0.1
-        )(x, x)
-        
-        # Add & Norm
-        x = LayerNormalization(epsilon=1e-6)(x + attention_output)
-        
-        # Feed-forward
-        ffn = Dense(512, activation='relu')(x)
-        ffn = Dropout(0.1)(ffn)
-        ffn = Dense(n_features)(ffn)
-        
-        # Add & Norm
-        x = LayerNormalization(epsilon=1e-6)(x + ffn)
-    
-    # Global pooling
-    x = GlobalAveragePooling1D()(x)
-    
-    # Dense layers
-    x = Dense(128, activation='relu')(x)
-    x = Dropout(0.1)(x)
-    x = Dense(64, activation='relu')(x)
-    x = Dropout(0.1)(x)
-    
-    # Output layer
-    output_layer = Dense(n_classes, activation='softmax')(x)
-    
-    # Create model
-    model = Model(inputs=input_layer, outputs=output_layer)
+            num_heads=8, key_dim=attention_key_dim, dropout=0.1,
+            name=f"multihead_attention_{i+1}"
+        )(x, x) # Self-attention: query, key, and value are all `x`.
 
-    initial_learning_rate = 0.001
+        # Add & Norm (Residual connection followed by Layer Normalization).
+        x = LayerNormalization(epsilon=1e-6, name=f"layernorm_attn_{i+1}")(x + attention_output)
 
-    optimizer = Adam(learning_rate=initial_learning_rate)
-    
+        # Feed-Forward Network (applied to each position independently).
+        ffn_output = Dense(512, activation='relu', name=f"ffn_dense1_{i+1}")(x)
+        ffn_output = Dropout(0.1, name=f"ffn_dropout_{i+1}")(ffn_output)
+        ffn_output = Dense(n_features, name=f"ffn_dense2_{i+1}")(ffn_output) # Project back to n_features for residual.
+
+        # Add & Norm.
+        x = LayerNormalization(epsilon=1e-6, name=f"layernorm_ffn_{i+1}")(x + ffn_output)
+    # `x` now holds the processed sequence: (batch_size, sequence_length, n_features).
+
+    # TimeDistributed Dense layers for final per-frame classification.
+    x = TimeDistributed(Dense(128, activation='relu'), name="timedist_dense_transformer_1")(x)
+    x = Dropout(0.1, name="dropout_transformer_1")(x) # Using dropout rates typical for Transformers.
+    x = TimeDistributed(Dense(64, activation='relu'), name="timedist_dense_transformer_2")(x)
+    x = Dropout(0.1, name="dropout_transformer_2")(x)
+
+    # Per-frame output layer.
+    output_layer = TimeDistributed(Dense(n_classes, activation='softmax'), name="output_per_frame_transformer")(x)
+
+    model = Model(inputs=input_layer, outputs=output_layer, name="PerFrameTransformer")
+    optimizer = Adam(learning_rate=0.001)
     model.compile(
         optimizer=optimizer,
         loss='sparse_categorical_crossentropy',
         metrics=['accuracy']
     )
-    
     return model
-# Create ensemble models
-def create_ensemble_models(n_classes, sequence_length, n_features):
-    """Create multiple models with different architectures for ensembling."""
-    models = []
 
-    # Model 2: CNN-LSTM
-    model2 = create_cnn_lstm_model(n_classes, sequence_length, n_features)
-    models.append(('CNN_LSTM', model2))
-    
-    # Model 1: Attention-based LSTM
-    model1 = create_attention_model(n_classes, sequence_length, n_features)
-    models.append(('Attention_LSTM', model1))
-    
-    # Model 3: Transformer-based
-    model3 = create_transformer_model(n_classes, sequence_length, n_features)
-    models.append(('Transformer', model3))
-    
-    return models
-# Train ensemble models
-def train_ensemble_models(X_train, y_train, X_val, y_val, models,sequence_length=30):
-    """Train multiple models for ensembling."""
+# --- Updated Ensemble and Training Functions ---
+
+def create_ensemble_models_per_frame(n_classes, sequence_length, n_features):
+    """
+    Creates a list of model definition tuples (name, creation_function) for ensembling.
+    All models are designed for per-frame prediction.
+
+    Note: The CNN-LSTM model (`create_cnn_lstm_per_frame_model`) inherently produces
+    an output sequence shorter than the input `sequence_length` due to pooling layers.
+    For effective ensembling via averaging, model outputs should ideally have identical
+    shapes (including sequence length). This discrepancy needs to be addressed either by:
+    1. Modifying the CNN-LSTM model to include UpSampling1D layers to restore sequence length.
+    2. Implementing more sophisticated ensembling logic in `ensemble_prediction_per_frame`
+       that can handle differing sequence lengths (e.g., by upsampling predictions post-hoc,
+       or by using only a subset of frames for models with shorter outputs).
+    3. Training and evaluating the CNN-LSTM model separately if alignment is too complex.
+
+    Args:
+        n_classes (int): Number of target classes.
+        sequence_length (int): Length of input sequences.
+        n_features (int): Number of features per time step.
+
+    Returns:
+        list: A list of tuples, where each tuple contains a model name (str)
+              and its corresponding creation function (callable).
+    """
+    models_definitions = [
+        ('Per_Frame_LSTM', create_attention_lstm_per_frame_model),
+        # The CNN-LSTM model is included, but caller must be aware of its shorter output sequence.
+        ('Per_Frame_CNN_LSTM', create_cnn_lstm_per_frame_model),
+        ('Per_Frame_Transformer', create_transformer_per_frame_model)
+    ]
+    return models_definitions
+
+def train_ensemble_models(
+    X_train, y_train_sequence, X_val, y_val_sequence,
+    models_defs, sequence_length, n_features, n_classes, epochs=100, batch_size=32
+):
+    """
+    Trains a list of defined models for ensembling.
+
+    Labels (`y_train_sequence`, `y_val_sequence`) are expected to be adapted for
+    per-frame training, i.e., shape (num_samples, sequence_length).
+
+    Args:
+        X_train (np.ndarray): Training data.
+        y_train_sequence (np.ndarray): Training labels, adapted for per-frame output.
+        X_val (np.ndarray): Validation data.
+        y_val_sequence (np.ndarray): Validation labels, adapted for per-frame output.
+        models_defs (list): List of (name, creation_function) tuples for models.
+        sequence_length (int): Original input sequence length.
+        n_features (int): Number of features.
+        n_classes (int): Number of classes.
+        epochs (int): Number of training epochs.
+        batch_size (int): Batch size for training.
+
+    Returns:
+        list: List of (name, trained_model) tuples.
+    """
     trained_models = []
+    # Input data `X_train`, `X_val` are assumed to be correctly shaped: (num_samples, sequence_length, n_features).
 
-    X_train = X_train.reshape(-1,sequence_length, 93)
-    X_val = X_val.reshape(-1,sequence_length, 93)
-    
-    for name, model in models:
+    for name, model_create_func in models_defs:
         print(f"\nTraining {name} model...")
-        
-        # Train the model
-        history = model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=500,  # Train longer
-            batch_size=32,
-            callbacks=[
-                tf.keras.callbacks.EarlyStopping(
-                    monitor='val_loss',
-                    patience=15,  # More patience
-                    restore_best_weights=True
-                ),
-                tf.keras.callbacks.ReduceLROnPlateau(
-                    monitor='val_loss',
-                    factor=0.2,
-                    patience=7,
-                    min_lr=0.0001
-                ),
-                tf.keras.callbacks.ModelCheckpoint(
-                    filepath=f'model/sign_language_model_{name}.h5',
-                    monitor='val_loss',
-                    save_best_only=True
-                )
-            ]
-        )
-        
-        # Evaluate
-        val_loss, val_acc = model.evaluate(X_val, y_val, verbose=0)
-        print(f"{name} validation accuracy: {val_acc:.4f}")
-        
-        # Save the model
-        model.save_weights(f'model/sign_language_model_{name}.weights.h5')
-        print(f"{name} model saved")
-        
-        trained_models.append((name, model))
+        # Instantiate a new model for each training cycle to ensure fresh weights.
+        model = model_create_func(n_classes, sequence_length, n_features)
 
-    return trained_models
-# Make ensemble predictions
-def ensemble_prediction(models, X_data):
-    """Make predictions using ensemble of models."""
-    predictions = []
-    
-    for name, model in models:
-        pred = model.predict(X_data, verbose=0)
-        predictions.append(pred)
-    
-    # Average predictions
-    ensemble_pred = np.mean(predictions, axis=0)
-    return ensemble_pred
-# High-accuracy training with cross-validation
-def train_high_accuracy_model(train_df, val_df, sequence_length=30):
-    print("Sequence length:", sequence_length)
-    """Train with cross-validation and ensemble models for high accuracy."""
-    # Prepare sequences with enhanced features
-    print("Preparing training data...")
-    X_train, y_train_raw = prepare_sequences(train_df, sequence_length, include_pairwise=True)
-    print("Training data shape:", X_train.shape)
-    
-    print("Preparing validation data...")
-    X_val, y_val_raw = prepare_sequences(val_df, sequence_length, include_pairwise=True)
-    print("Validation data shape:", X_val.shape)
-    
-    # Encode labels
-    label_encoder = LabelEncoder()
-    label_encoder.fit(y_train_raw)
-    y_train = label_encoder.transform(y_train_raw)
-    #y_val_raw = [label for label in y_val_raw if label in label_encoder.classes_]
-    y_val = label_encoder.transform(y_val_raw)
-    
-    print(f"Number of classes: {len(label_encoder.classes_)}")
-    print(f"Classes: {label_encoder.classes_}")
-    
-    # Get feature dimension
-    n_features = X_train.shape[2]
-    n_classes = len(label_encoder.classes_)
-    
-    print(f"Input shape: (None, {sequence_length}, {n_features})")
-    
-    # Create model ensemble
-    print("Creating ensemble models...")
-    models = create_ensemble_models(n_classes, sequence_length, n_features)
-    
-    # Create directories if they don't exist
-    os.makedirs("model", exist_ok=True)
-    
-    # Train ensemble with cross-validation
-    print("Training ensemble models...")
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)
-    
-    fold_accuracies = {}
-    for name, _ in models:
-        fold_accuracies[name] = []
-    
-    for fold, (train_idx, val_idx) in enumerate(kf.split(X_train)):
-        print(f"\nFold {fold + 1}/5")
-        
-        # Split data
-        X_fold_train, X_fold_val = X_train[train_idx], X_train[val_idx]
-        y_fold_train, y_fold_val = y_train[train_idx], y_train[val_idx]
-        
-        # Train each model in ensemble
-        for name, model in models:
-            print(f"Training {name} on fold {fold + 1}...")
-            
-            # Reset model
-            if name == 'Attention_LSTM':
-                model = create_attention_model(n_classes, sequence_length, n_features)
-            elif name == 'CNN_LSTM':
-                model = create_cnn_lstm_model(n_classes, sequence_length, n_features)
-            elif name == 'Transformer':
-                model = create_transformer_model(n_classes, sequence_length, n_features)
-            
-            # Train
-            model.fit(
-                X_fold_train, y_fold_train,
-                validation_data=(X_fold_val, y_fold_val),
-                epochs=200,
-                batch_size=32,
-                callbacks=[
-                    tf.keras.callbacks.EarlyStopping(
-                        monitor='val_loss',
-                        patience=10,
-                        restore_best_weights=True
-                    )
-                ],
-                verbose=1
+        # --- Handling label shapes for models with altered sequence lengths (e.g., CNN-LSTM) ---
+        # The current label adaptation (repeating single label for `sequence_length` frames)
+        # might not align with models that internally change sequence length (like CNN-LSTM).
+        # For CNN-LSTM, its output sequence length is `sequence_length / 4` (approx).
+        # A robust solution requires:
+        #   a) The model itself upsamples its output to `sequence_length`.
+        #   b) Labels are specifically prepared/pooled to match `sequence_length / 4`.
+        #   c) A custom loss function that handles misaligned lengths.
+        # For this generic training function, we proceed with original labels,
+        # but this is a critical point for the CNN-LSTM model's performance.
+        current_y_train = y_train_sequence
+        current_y_val = y_val_sequence
+
+        if name == 'Per_Frame_CNN_LSTM':
+            # The model.output_shape gives (None, pooled_seq_len, n_classes)
+            pooled_seq_len = model.output_shape[1]
+            if pooled_seq_len is not None and pooled_seq_len != sequence_length:
+                print(f"WARNING: {name} outputs sequence length {pooled_seq_len}, "
+                      f"while labels have length {sequence_length}. "
+                      "Loss calculation might be problematic or require label adaptation not implemented here.")
+                # Example of a crude label adaptation (not recommended for production without validation):
+                # Slice or pool labels to match pooled_seq_len.
+                # This is highly dependent on the pooling strategy and desired behavior.
+                # For example, if just taking the first `pooled_seq_len` labels:
+                # current_y_train = y_train_sequence[:, :pooled_seq_len]
+                # current_y_val = y_val_sequence[:, :pooled_seq_len]
+                # However, this assumes the sign information is concentrated at the start.
+                # A better approach is to modify the CNN-LSTM model to include an UpSampling1D layer.
+                pass # Proceeding with original labels; TensorFlow might broadcast or error.
+
+        # Define Keras callbacks for robust training.
+        callbacks = [
+            tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss', patience=15, restore_best_weights=True, verbose=1
+            ),
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss', factor=0.2, patience=7, min_lr=0.00001, verbose=1
+            ),
+            tf.keras.callbacks.ModelCheckpoint(
+                # Using .keras format for saving the entire model (architecture, weights, optimizer state).
+                filepath=f'model/sign_language_model_{name}_per_frame.keras',
+                monitor='val_loss', save_best_only=True
             )
-            
-            # Evaluate
-            _, acc = model.evaluate(X_fold_val, y_fold_val, verbose=0)
-            fold_accuracies[name].append(acc)
-            print(f"{name} fold {fold + 1} accuracy: {acc:.4f}")
-    
-    # Print cross-validation results
-    print("\nCross-validation results:")
-    for name in fold_accuracies:
-        mean_acc = np.mean(fold_accuracies[name])
-        print(f"{name}: Mean accuracy = {mean_acc:.4f}")
-    
-    # Train final ensemble models on all training data
-    trained_models = train_ensemble_models(X_train, y_train, X_val, y_val, models, sequence_length)
-    
-    # Save label encoder
-    with open('model/label_encoder.pkl', 'wb') as f:
-        pickle.dump(label_encoder, f)
-    print("Label encoder saved to model/label_encoder.pkl")
-    
-    # Final evaluation on validation data
-    print("\nEvaluating ensemble on validation data...")
-    ensemble_preds = ensemble_prediction(trained_models, X_val)
-    ensemble_classes = np.argmax(ensemble_preds, axis=1)
-    
-    # Calculate accuracy
-    accuracy = np.mean(ensemble_classes == y_val)
-    print(f"Ensemble validation accuracy: {accuracy:.4f}")
-    
-    return trained_models, label_encoder
-# Load ensemble models
-def load_ensemble_models():
-    """Load trained ensemble models."""
-    print("Loading ensemble models...")
-    models = []
-    
-    # Create model directory if it doesn't exist
-    os.makedirs("model", exist_ok=True)
-    
-    # Find model files
-    model_files = [f for f in os.listdir('model') if f.startswith('sign_language_model_') and f.endswith('.h5')]
-    
-    if not model_files:
-        print("No ensemble models found.")
-        return None, None
-    
-    # Load each model
-    for model_file in model_files:
-        name = model_file.replace('sign_language_model_', '').replace('.h5', '')
-        try:
-            model = tf.keras.models.load_model(f'model/{model_file}')
-            models.append((name, model))
-            print(f"Loaded {name} model")
-        except Exception as e:
-            print(f"Error loading {name} model: {e}")
-    
-    # Load label encoder
-    try:
-        with open('model/label_encoder.pkl', 'rb') as f:
-            label_encoder = pickle.load(f)
-        print(f"Loaded label encoder with {len(label_encoder.classes_)} classes")
-    except Exception as e:
-        print(f"Error loading label encoder: {e}")
-        return models, None
-    
-    return models, label_encoder
-# Evaluate the model
-def evaluate_model(test_df):
-    """Evaluate the ensemble model on test data."""
-    # Load ensemble models
-    models, label_encoder = load_ensemble_models()
-    
-    if not models or not label_encoder:
-        print("Error: Models or label encoder not loaded correctly.")
-        return
-    
-    # Prepare test sequences
-    print("Preparing test data...")
-    X_test, y_test_raw = prepare_sequences(test_df, include_pairwise=True)
-    
-    # Check if we have test data
-    if len(X_test) == 0:
-        print("Error: No test sequences could be created. Check your test data.")
-        return
-    
-    print(f"Test data shape: {X_test.shape}")
-    
-    # Encode labels
-    y_test = label_encoder.transform(y_test_raw)
-    
-    # Generate predictions for each model
-    print("Generating individual model predictions...")
-    model_accuracies = {}
-    
+        ]
+
+        # Train the model.
+        history = model.fit(
+            X_train, current_y_train,
+            validation_data=(X_val, current_y_val),
+            epochs=epochs,
+            batch_size=batch_size,
+            callbacks=callbacks,
+            verbose=1 # Or 2 for less output per epoch.
+        )
+
+        # Evaluate the model on validation set (best weights are restored by EarlyStopping).
+        val_loss, val_acc = model.evaluate(X_val, current_y_val, verbose=0)
+        print(f"{name} final validation accuracy (per-frame, best epoch): {val_acc:.4f}")
+        # The model is already saved by ModelCheckpoint callback at its best performance.
+        # model.save(f'model/sign_language_model_{name}_per_frame.keras') # Redundant if ModelCheckpoint used.
+        print(f"{name} best model saved via ModelCheckpoint.")
+        trained_models.append((name, model)) # Append the model instance with restored best weights.
+    return trained_models
+
+
+def ensemble_prediction_per_frame(models, X_data):
+    """
+    Generates ensemble predictions by averaging outputs from compatible models.
+
+    This function attempts to handle models that might output sequences of
+    different lengths (e.g., CNN-LSTM vs. LSTM/Transformer). It prioritizes
+    predictions from models matching the input data's sequence length.
+    For models with shorter sequences (like CNN-LSTM), a crude upsampling
+    (np.repeat) is demonstrated. A more robust solution involves designing models
+    (e.g., with UpSampling1D layers) to output consistent sequence lengths.
+
+    Args:
+        models (list): List of (name, trained_model) tuples.
+        X_data (np.ndarray): Input data for prediction.
+
+    Returns:
+        np.ndarray: Averaged probability predictions from the ensemble, with shape
+                    (num_samples, target_sequence_length, n_classes).
+                    Returns an empty array if no compatible predictions can be made.
+    """
+    predictions_to_average = []
+    # Target sequence length is derived from the input data.
+    target_seq_len = X_data.shape[1]
+
     for name, model in models:
-        y_pred = model.predict(X_test)
-        y_pred_classes = np.argmax(y_pred, axis=1)
-        accuracy = np.mean(y_pred_classes == y_test)
-        model_accuracies[name] = accuracy
-        print(f"{name} model accuracy: {accuracy:.4f}")
-    
-    # Generate ensemble predictions
-    print("\nGenerating ensemble predictions...")
-    y_pred_prob = ensemble_prediction(models, X_test)
-    y_pred = np.argmax(y_pred_prob, axis=1)
-    
-    # Calculate metrics
-    accuracy = np.mean(y_pred == y_test)
-    print(f"Ensemble accuracy: {accuracy:.4f}")
-    
-    print("\nClassification Report:")
-    print(classification_report(y_test, y_pred, 
-                               target_names=label_encoder.classes_))
-    
-    # Generate confusion matrix
-    cm = confusion_matrix(y_test, y_pred)
-    
-    # Plot and save confusion matrix
-    plt.figure(figsize=(12, 10))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-               xticklabels=label_encoder.classes_,
-               yticklabels=label_encoder.classes_)
-    plt.xlabel('Predicted')
-    plt.ylabel('True')
-    plt.title('Confusion Matrix')
-    plt.tight_layout()
-    plt.savefig('confusion_matrix.png')
-    print("Confusion matrix saved to confusion_matrix.png")
+        # Get raw predictions from the current model.
+        pred_raw = model.predict(X_data, verbose=0) # Shape: (samples, model_output_seq_len, classes)
+        model_output_seq_len = pred_raw.shape[1]
+
+        if model_output_seq_len == target_seq_len:
+            # If model's output sequence length matches target, add directly.
+            predictions_to_average.append(pred_raw)
+        elif name == 'Per_Frame_CNN_LSTM' and model_output_seq_len < target_seq_len:
+            # Handle CNN-LSTM: its output sequence is shorter.
+            # Attempt crude upsampling. For production, an UpSampling1D layer in the
+            # model architecture itself is a much better approach.
+            print(f"INFO: {name} output seq len {model_output_seq_len} differs from target {target_seq_len}. "
+                  "Attempting crude upsampling for ensembling.")
+            
+            # Calculate integer upsampling factor.
+            if target_seq_len % model_output_seq_len == 0:
+                factor = target_seq_len // model_output_seq_len
+                pred_upsampled = np.repeat(pred_raw, factor, axis=1) # Repeats each time step `factor` times.
+                
+                # Verify shape after repeat, adjust if necessary (e.g. if factor was imperfect)
+                if pred_upsampled.shape[1] == target_seq_len:
+                    predictions_to_average.append(pred_upsampled)
+                else: # Fallback if repeat didn't match exactly
+                    print(f"WARNING: Upsampling for {name} resulted in {pred_upsampled.shape[1]} len, expected {target_seq_len}. Skipping.")
+            else:
+                print(f"WARNING: Cannot apply simple repeat upsampling for {name} as target_seq_len "
+                      f"({target_seq_len}) is not a multiple of model_output_seq_len ({model_output_seq_len}). Skipping.")
+        else:
+            # Skip models whose output sequence length doesn't match and for which
+            # no specific handling is implemented.
+            print(f"INFO: Skipping {name} from ensemble due to sequence length mismatch "
+                  f"(Output: {model_output_seq_len}, Target: {target_seq_len}) and no upsampling rule.")
+
+    if not predictions_to_average:
+        print("ERROR: No compatible model predictions available for ensembling.")
+        # Return an empty array or raise an exception, depending on desired error
