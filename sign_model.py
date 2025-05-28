@@ -4,7 +4,6 @@ import pickle
 import os
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix
-# from sklearn.model_selection import KFold # Only if KFold is used
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
@@ -14,11 +13,7 @@ from tensorflow.keras.layers import (
     TimeDistributed, LayerNormalization, MultiHeadAttention
 )
 from tensorflow.keras.optimizers import Adam
-
-# Assuming data_processing.py is in the same directory or Python path
 from data_processing import prepare_sequences # Make sure this matches your file name
-
-# --- MODEL DEFINITIONS FOR PER-FRAME PREDICTIONS ---
 
 def create_attention_lstm_per_frame_model(n_classes, sequence_length, n_features):
     """LSTM-based model for per-frame predictions."""
