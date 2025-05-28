@@ -317,17 +317,8 @@ def pad_seq(sequence_of_frames, desired_sequence_length):
 def prepare_sequences(landmarks_dataframe, sequence_length=14, include_pairwise=True, pad_value=0.0):
     """
     Convert the landmarks DataFrame into a 3D numpy array (num_sequences, sequence_length, features)
-    and a corresponding array of labels, suitable for LSTM input.
-
-    Features per frame include:
-      - For each of up to 2 hands:
-        * 21 landmarks × 3 coords = 63 base coordinate values
-        * 15 pairwise distance features + 15 cosine-angle features (if include_pairwise=True)
-      - Deltas between consecutive frames for all base features (i.e., twice the features per frame)
-
-    Final output:
-      - all_sequences: shape (num_windows, sequence_length, feature_dim)
-      - all_labels: shape (num_windows,)
+    and a corresponding array of labels, suitable for LSTM input, without segmentation/windows.
+    Each video produces exactly one sequence, padded or truncated to sequence_length.
     """
     all_sequences = []
     all_labels = []
@@ -351,12 +342,11 @@ def prepare_sequences(landmarks_dataframe, sequence_length=14, include_pairwise=
     # Final features per frame including deltas (double the above)
     expected_features_per_frame = total_features_frame_no_deltas * 2
 
-    print(f"Preparing sequences. Expecting {expected_features_per_frame} features per frame "
+    print(f"Preparing sequences without segmentation. Expecting {expected_features_per_frame} features per frame "
           f"({NUM_HANDS_TO_PROCESS} hands, with deltas).")
     print(f"  Breakdown per hand (no deltas): {base_coord_features_per_hand} (coords) + "
           f"{pairwise_feature_count_per_hand} (pairwise) = {features_per_hand_no_deltas}")
 
-    # Iterate over each row (video) in the DataFrame
     for idx, row in tqdm(landmarks_dataframe.iterrows(), total=len(landmarks_dataframe)):
         video_id = row['video_id']
         label = row['label']
@@ -381,84 +371,73 @@ def prepare_sequences(landmarks_dataframe, sequence_length=14, include_pairwise=
         # If fewer frames than sequence_length, pad with dummy frames
         if len(current_video_frames_list) < sequence_length:
             current_video_frames_list = pad_seq(current_video_frames_list, sequence_length)
+        # If more frames than sequence_length, truncate to the first sequence_length frames
+        elif len(current_video_frames_list) > sequence_length:
+            current_video_frames_list = current_video_frames_list[:sequence_length]
 
-        num_frames_in_video = len(current_video_frames_list)
+        # Now we have exactly sequence_length frames
+        window_base_features_list = []
 
-        # Determine sliding window stride to limit the number of windows
-        stride = 1
-        if num_frames_in_video > sequence_length:
-            # Aim for roughly 3 windows per video, capped by sequence_length/2
-            stride = max(1, (num_frames_in_video - sequence_length + 1) // 3)
-            stride = min(stride, sequence_length // 2)
-            stride = max(1, stride)
+        for frame_data_dict in current_video_frames_list:
+            normalized_frame_data = normalize_landmarks_enhanced(frame_data_dict)
+            current_frame_all_hands_base_features = []
+            hands_processed_count = 0
 
-        # Slide over frames to build windows of length = sequence_length
-        for start_idx in range(0, num_frames_in_video - sequence_length + 1, stride):
-            window_of_frames_dicts = current_video_frames_list[start_idx : start_idx + sequence_length]
-            window_base_features_list = []
+            if normalized_frame_data and normalized_frame_data.get('landmarks'):
+                for hand_idx, hand_normalized_landmarks in enumerate(normalized_frame_data['landmarks']):
+                    if hand_idx >= NUM_HANDS_TO_PROCESS:
+                        # Only process up to the first two hands
+                        break
 
-            # For each frame in the window, compute per-frame base features
-            for frame_data_dict in window_of_frames_dicts:
-                normalized_frame_data = normalize_landmarks_enhanced(frame_data_dict)
-                current_frame_all_hands_base_features = []
-                hands_processed_count = 0
+                    # 1) Extract raw (x,y,z) coordinates for all landmarks of this hand
+                    single_hand_coords = []
+                    for point in hand_normalized_landmarks:
+                        single_hand_coords.extend(point[1:4])
+                    # If fewer than expected, pad with pad_value
+                    while len(single_hand_coords) < base_coord_features_per_hand:
+                        single_hand_coords.append(pad_value)
+                    current_frame_all_hands_base_features.extend(single_hand_coords[:base_coord_features_per_hand])
 
-                if normalized_frame_data and normalized_frame_data.get('landmarks'):
-                    for hand_idx, hand_normalized_landmarks in enumerate(normalized_frame_data['landmarks']):
-                        if hand_idx >= NUM_HANDS_TO_PROCESS:
-                            # Only process up to the first two hands
-                            break
+                    # 2) Compute pairwise features if requested
+                    if include_pairwise:
+                        pairwise_feats = calculate_single_hand_pairwise_features(hand_normalized_landmarks, pad_value)
+                        current_frame_all_hands_base_features.extend(pairwise_feats)
+                    else:
+                        # Pad to keep consistent feature length
+                        current_frame_all_hands_base_features.extend([pad_value] * pairwise_feature_count_per_hand)
 
-                        # 1) Extract raw (x,y,z) coordinates for all landmarks of this hand
-                        single_hand_coords = []
-                        for point in hand_normalized_landmarks:
-                            single_hand_coords.extend(point[1:4])
-                        # If fewer than expected, pad with pad_value
-                        while len(single_hand_coords) < base_coord_features_per_hand:
-                            single_hand_coords.append(pad_value)
-                        current_frame_all_hands_base_features.extend(single_hand_coords[:base_coord_features_per_hand])
-
-                        # 2) Compute pairwise features if requested
-                        if include_pairwise:
-                            pairwise_feats = calculate_single_hand_pairwise_features(hand_normalized_landmarks, pad_value)
-                            current_frame_all_hands_base_features.extend(pairwise_feats)
-                        else:
-                            # Pad to keep consistent feature length
-                            current_frame_all_hands_base_features.extend([pad_value] * pairwise_feature_count_per_hand)
-
-                        hands_processed_count += 1
-
-                # If fewer than NUM_HANDS_TO_PROCESS hands were detected, pad accordingly
-                while hands_processed_count < NUM_HANDS_TO_PROCESS:
-                    current_frame_all_hands_base_features.extend([pad_value] * features_per_hand_no_deltas)
                     hands_processed_count += 1
 
-                # Ensure this frame's feature vector (without deltas) has the correct length
-                while len(current_frame_all_hands_base_features) < total_features_frame_no_deltas:
-                    current_frame_all_hands_base_features.append(pad_value)
-                current_frame_all_hands_base_features = current_frame_all_hands_base_features[:total_features_frame_no_deltas]
+            # If fewer than NUM_HANDS_TO_PROCESS hands were detected, pad accordingly
+            while hands_processed_count < NUM_HANDS_TO_PROCESS:
+                current_frame_all_hands_base_features.extend([pad_value] * features_per_hand_no_deltas)
+                hands_processed_count += 1
 
-                window_base_features_list.append(current_frame_all_hands_base_features)
+            # Ensure this frame's feature vector (without deltas) has the correct length
+            while len(current_frame_all_hands_base_features) < total_features_frame_no_deltas:
+                current_frame_all_hands_base_features.append(pad_value)
+            current_frame_all_hands_base_features = current_frame_all_hands_base_features[:total_features_frame_no_deltas]
 
-            # If we successfully built a full-length window, compute deltas
-            if len(window_base_features_list) == sequence_length:
-                final_feature_sequence_for_window = []
+            window_base_features_list.append(current_frame_all_hands_base_features)
 
-                # The first frame has zero deltas
-                first_base_feats = window_base_features_list[0]
-                deltas_first_frame = [pad_value] * total_features_frame_no_deltas
-                final_feature_sequence_for_window.append(list(first_base_feats) + deltas_first_frame)
+        # Compute deltas between frames
+        final_feature_sequence_for_video = []
 
-                # For subsequent frames, compute (current - previous)
-                for k in range(1, sequence_length):
-                    prev_feats = np.array(window_base_features_list[k - 1])
-                    curr_feats = np.array(window_base_features_list[k])
-                    delta_feats = (curr_feats - prev_feats).tolist()
-                    final_feature_sequence_for_window.append(list(curr_feats) + delta_feats)
+        # First frame: base features + zeros for deltas
+        first_base_feats = window_base_features_list[0]
+        deltas_first_frame = [pad_value] * total_features_frame_no_deltas
+        final_feature_sequence_for_video.append(list(first_base_feats) + deltas_first_frame)
 
-                # Append this sequence and its label
-                all_sequences.append(final_feature_sequence_for_window)
-                all_labels.append(label)
+        # Subsequent frames: (current_base - previous_base) as deltas
+        for k in range(1, sequence_length):
+            prev_feats = np.array(window_base_features_list[k - 1])
+            curr_feats = np.array(window_base_features_list[k])
+            delta_feats = (curr_feats - prev_feats).tolist()
+            final_feature_sequence_for_video.append(list(curr_feats) + delta_feats)
+
+        # Append this single sequence and its label
+        all_sequences.append(final_feature_sequence_for_video)
+        all_labels.append(label)
 
     return np.array(all_sequences), np.array(all_labels)
 ```
