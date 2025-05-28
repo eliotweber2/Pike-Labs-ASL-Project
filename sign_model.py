@@ -105,27 +105,48 @@ def train_ensemble_models(
         print(f"\nTraining {name} model...")
         model = model_create_func(n_classes, sequence_length, n_features)
 
-        # Create labels that match this model's output sequence length
-        model_output_seq_len = model.output_shape[1]
-        if model_output_seq_len is None:
-            # Dynamic shape, assume it matches input for non-CNN models
-            model_output_seq_len = sequence_length
+        # Get the actual output sequence length from the model
+        # We need to do a forward pass to determine the output shape for dynamic models
+        sample_input = np.zeros((1, sequence_length, n_features))
+        sample_output = model.predict(sample_input, verbose=0)
+        model_output_seq_len = sample_output.shape[1]
+        
+        print(f"Model {name} - Input shape: {model.input_shape}, Output shape: {model.output_shape}")
+        print(f"Model {name} - Actual output sequence length: {model_output_seq_len}")
         
         # Adjust labels to match model output sequence length
         if model_output_seq_len != y_train_sequence.shape[1]:
             print(f"Adjusting labels for {name}: from {y_train_sequence.shape[1]} to {model_output_seq_len} frames")
-            # For CNN-LSTM, we need to downsample the labels to match the pooled sequence length
-            # Simple approach: take every nth label where n = original_length / new_length
-            downsample_factor = y_train_sequence.shape[1] / model_output_seq_len
-            indices = np.round(np.linspace(0, y_train_sequence.shape[1] - 1, model_output_seq_len)).astype(int)
-            y_train_model = y_train_sequence[:, indices]
-            y_val_model = y_val_sequence[:, indices]
+            
+            # Calculate downsampling indices
+            original_length = y_train_sequence.shape[1]
+            if model_output_seq_len < original_length:
+                # Downsample: take evenly spaced indices
+                indices = np.round(np.linspace(0, original_length - 1, model_output_seq_len)).astype(int)
+                y_train_model = y_train_sequence[:, indices]
+                y_val_model = y_val_sequence[:, indices]
+            else:
+                # Upsample: repeat indices (though this case is less common)
+                repeat_factor = model_output_seq_len // original_length
+                remainder = model_output_seq_len % original_length
+                y_train_model = np.repeat(y_train_sequence, repeat_factor, axis=1)
+                y_val_model = np.repeat(y_val_sequence, repeat_factor, axis=1)
+                if remainder > 0:
+                    y_train_model = np.concatenate([y_train_model, y_train_sequence[:, :remainder]], axis=1)
+                    y_val_model = np.concatenate([y_val_model, y_val_sequence[:, :remainder]], axis=1)
         else:
             y_train_model = y_train_sequence
             y_val_model = y_val_sequence
 
-        print(f"Model {name} - Input shape: {model.input_shape}, Output shape: {model.output_shape}")
         print(f"Model {name} - Training with label shape: {y_train_model.shape}")
+        print(f"Model {name} - Expected model output shape: (batch_size, {model_output_seq_len}, {n_classes})")
+
+        # Verify shapes match
+        expected_label_shape = (y_train_model.shape[0], model_output_seq_len)
+        actual_label_shape = y_train_model.shape
+        if expected_label_shape != actual_label_shape:
+            print(f"Critical Warning: Model '{name}' output sequence length ({model_output_seq_len}) does not match label sequence length ({actual_label_shape[1]}). This will likely cause errors or incorrect training. Review model architecture (e.g., UpSampling in CNN-LSTM).")
+            continue  # Skip this model to avoid training errors
 
         callbacks = [
             tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=1),
@@ -134,13 +155,18 @@ def train_ensemble_models(
                                                monitor='val_loss', save_best_only=True)
         ]
         
-        model.fit(X_train, y_train_model, validation_data=(X_val, y_val_model),
-                  epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=1)
-        _, val_acc = model.evaluate(X_val, y_val_model, verbose=0)
-        print(f"{name} final validation accuracy (per-frame): {val_acc:.4f}")
-        trained_models.append((name, model))
+        try:
+            model.fit(X_train, y_train_model, validation_data=(X_val, y_val_model),
+                      epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=1)
+            _, val_acc = model.evaluate(X_val, y_val_model, verbose=0)
+            print(f"{name} final validation accuracy (per-frame): {val_acc:.4f}")
+            trained_models.append((name, model))
+        except Exception as e:
+            print(f"Error training {name}: {e}")
+            continue
+            
     return trained_models
-
+    
 def ensemble_prediction_per_frame(models, X_data):
     """Ensemble predictions by averaging. Handles different sequence lengths by taking majority vote per original frame."""
     if not models:
