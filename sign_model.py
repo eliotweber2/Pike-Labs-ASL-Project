@@ -13,7 +13,10 @@ from tensorflow.keras.layers import (
     TimeDistributed, LayerNormalization, MultiHeadAttention
 )
 from tensorflow.keras.optimizers import Adam
-from data_processing import prepare_sequences # Make sure this matches your file name
+
+# Assuming data_processing.py is in the same directory or Python path
+from data_processing import prepare_sequences
+# --- MODEL DEFINITIONS FOR PER-FRAME PREDICTIONS ---
 
 def create_attention_lstm_per_frame_model(n_classes, sequence_length, n_features):
     """LSTM-based model for per-frame predictions."""
@@ -159,6 +162,9 @@ def train_ensemble_models(
         except Exception as e:
             print(f"Error training {name}: {e}")
             continue
+
+    for model in trained_models:
+        model[1].save_weights(f'model/sign_language_model_{model[0]}_per_frame.weights.h5')
             
     return trained_models
     
